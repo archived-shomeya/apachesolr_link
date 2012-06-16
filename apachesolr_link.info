@@ -1,0 +1,5 @@
+name = Apache Solr Link
+description = Expose link fields to the Apachesolr search index
+package = Search Toolkit
+dependencies[] = apachesolr
+core = 7.x
