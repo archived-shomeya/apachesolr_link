@@ -114,7 +114,7 @@ function apachesolr_link_apachesolr_index_document_build_node(ApacheSolrDocument
   }
 
   foreach (apachesolr_entity_fields() as $field_name => $field) {
-    if (in_array($field['name'], $enabled_fields)) {
+    if (in_array($field[0]['name'], $enabled_fields)) {
       $solr_field = $document->getField($field_name);
       foreach ($solr_field['value'] as $value) {
         $document->setMultiValue('tm_apachesolr_link_content', $value);
@@ -126,6 +126,7 @@ function apachesolr_link_apachesolr_index_document_build_node(ApacheSolrDocument
 /**
  * Implement hook_apachesolr_query_prepare().
  */
-function apachesolr_link_apachesolr_query_prepare(DrupalSolrQueryInterface $current_query) {
-  $current_query->addParam('qf', 'tm_apachesolr_link_content');
+function apachesolr_link_apachesolr_query_prepare(DrupalSolrQueryInterface $query) {
+  $query->addParam('qf', 'tm_apachesolr_link_content');
+  $query->addParam('hl.fl', 'tm_apachesolr_link_content');
 }
