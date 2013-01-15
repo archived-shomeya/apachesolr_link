@@ -12,15 +12,80 @@
 function apachesolr_link_menu() {
   $items = array();
 
-  $items['admin/config/search/apachesolr_link'] = array(
-    'title' => 'Apache Solr Link settings',
+  $items['admin/config/search/apachesolr/apachesolr_link'] = array(
+    'title' => 'Link field indexing',
     'description' => 'Configure how link fields should be indexed by Apache Solr.',
     'page callback' => 'drupal_get_form',
     'page arguments' => array('apachesolr_link_settings_form'),
     'access arguments' => array('administer search'),
+    'type' => MENU_IS_LOCAL_TASK,
   );
 
   return $items;
+}
+
+/**
+ * Form builder for settings form.
+ */
+function apachesolr_link_settings_form($form, &$form_state) {
+  $fields = field_info_fields();
+  $options = array();
+  foreach ($fields as $field) {
+    if ($field['type'] === 'link_field') {
+      $options[$field['field_name']] = $field['field_name'];
+    }
+  }
+
+  $form['apachesolr_link_indexed_fields'] = array(
+    '#type' => 'checkboxes',
+    '#title' => 'Select fields that should have their link destinations indexed',
+    '#options' => $options,
+    '#default_value' => variable_get('apachesolr_link_indexed_fields', array()),
+  );
+
+  $form['apachesolr_link_plain_types'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Types indexed as plain text'),
+    '#default_value' => variable_get('apachesolr_link_plain_types', "text/plain\r\ntext/*html\r\ntext/xml\r\n"),
+    '#description' => t('These MIME types will be indexed as plain text, after stripping HTML tags and invisibile content (audio, video, applet, etc.). Enter one MIME type per line with optional wildcards, i.e. <em>text/*</em>. For a list of types see <a href="http://en.wikipedia.org/wiki/Mime_type">Wikipedia</a>.'),
+  );
+
+
+  if (module_exists('apachesolr_attachments')) {
+
+
+    $form['apachesolr_link_extract_files'] = array(
+      '#type' => 'checkbox',
+      '#title' => 'Enable extraction of documents with Apache Solr Attachments',
+      '#default_value' => variable_get('apachesolr_link_extract_files', FALSE),
+    );
+
+    $form['instructions'] = array(
+      '#type' => 'item',
+      '#markup' => t('Please configure the Apache Solr Attachments module on the <a href="@url">Apache Solr Attachments settings page</a>.', array('@url' => url('admin/config/search/apachesolr/attachments'))),
+      '#states' => array(
+        'visible' => array(
+          ':input[name="apachesolr_link_extract_files"]' => array('checked' => TRUE),
+        ),
+      ),
+    );
+
+    $form['apachesolr_link_attachment_types'] = array(
+      '#type' => 'textarea',
+      '#title' => t('Types to be extracted via Apache Solr Attachments'),
+      '#default_value' => variable_get('apachesolr_link_attachment_types', "application/*\r\n"),
+      '#description' => t('These MIME types will be treated as documents and text extraction with Tika will be performed using the settings from Apache Solr Attachments. Enter one MIME type per line with optional wildcards, i.e. <em>text/*</em>. For a list of types see <a href="http://en.wikipedia.org/wiki/Mime_type">Wikipedia</a>.'),
+      '#states' => array(
+        'visible' => array(
+          ':input[name="apachesolr_link_extract_files"]' => array('checked' => TRUE),
+        ),
+      ),
+    );
+
+  }
+
+
+  return system_settings_form($form);
 }
 
 /**
@@ -65,36 +130,47 @@ function apachesolr_link_fields_default_link_callback($entity, $field_name, $ind
 }
 
 /**
- * Form builder for settings form.
- */
-function apachesolr_link_settings_form($form, &$form_state) {
-  $fields = field_info_fields();
-  $options = array();
-  foreach ($fields as $field) {
-    if ($field['type'] === 'link_field') {
-      $options[$field['field_name']] = $field['field_name'];
-    }
-  }
-
-  $form['apachesolr_link_indexed_fields'] = array(
-    '#type' => 'checkboxes',
-    '#title' => 'Select fields that should have their link destinations indexed',
-    '#options' => $options,
-    '#default_value' => variable_get('apachesolr_link_indexed_fields', array()),
-  );
-
-  return system_settings_form($form);
-}
-
-/**
  * Return the cleaned version of the content of a URL.
  */
 function apachesolr_link_fetch_url_contents($url) {
-  $text = '';
   $abs_url = url($url, array('absolute' => TRUE));
   $response = drupal_http_request($abs_url);
   if (empty($response->error)) {
-    $text = apachesolr_clean_text($response->data);
+    if (apachesolr_link_match_mime($response->headers['content-type'], variable_get('apachesolr_link_plain_types', "text/plain\r\ntext/*html\r\ntext/xml\r\n"))) {
+      $text = apachesolr_clean_text($response->data);
+    }
+    elseif (module_exists('apachesolr_attachments') && variable_get('apachesolr_link_extract_files', FALSE) && apachesolr_link_match_mime($response->headers['content-type'], variable_get('apachesolr_link_attachment_types', "application/*\r\n"))) {
+      $file = file_save_data($response->data, 'temporary://' . drupal_basename($abs_url), FILE_EXISTS_RENAME);
+
+      // We have to set the status and save again since we can't specifyu with file_save_data().
+      $file->status = 0;
+      $file = file_save($file);
+      $filepath = drupal_realpath($file->uri);
+
+      // The next few lines are copied from the apachsolr_attachments.index.inc
+      if (variable_get('apachesolr_attachments_extract_using', 'tika') == 'tika') {
+        $text = apachesolr_attachments_extract_using_tika($filepath);
+      }
+      else {
+        // Extract using Solr.
+        try {
+          list($text, $metadata) = apachesolr_attachments_extract_using_solr($filepath);
+        }
+        catch (Exception $e) {
+          // Exceptions from Solr may be transient, or indicate a problem with a specific file.
+          watchdog('Apache Solr Attachments', "Exception occurred sending %filepath to Solr\n!message", array('%filepath' => $file->uri, '!message' => nl2br(check_plain($e->getMessage()))), WATCHDOG_ERROR);
+          return FALSE;
+        }
+      }
+
+      // Strip bad control characters.
+      $text = iconv("UTF-8", "UTF-8//IGNORE", $text);
+      $text = trim(apachesolr_clean_text($text));
+
+    }
+    else {
+      $text = '';
+    }
   }
   return $text;
 }
@@ -129,4 +205,38 @@ function apachesolr_link_apachesolr_index_document_build_node(ApacheSolrDocument
 function apachesolr_link_apachesolr_query_prepare(DrupalSolrQueryInterface $query) {
   $query->addParam('qf', 'tm_apachesolr_link_content');
   $query->addParam('hl.fl', 'tm_apachesolr_link_content');
+}
+
+/**
+ * Check if a mime type matches any pattern in a set of patterns.
+ *
+ * @param $type
+ *   The mime type to match.
+ * @param $patterns
+ *   String containing a set of patterns separated by \n, \r or \r\n.
+ *
+ * @return
+ *   Boolean value: TRUE if the mime type matches a pattern, FALSE otherwise.
+ */
+function apachesolr_link_match_mime($content_type_header, $patterns) {
+  $parts = explode(';', $content_type_header);
+  $type = $parts[0];
+
+  $regexps = &drupal_static(__FUNCTION__);
+
+  if (!isset($regexps[$patterns])) {
+    // Convert path settings to a regular expression.
+    // Therefore replace newlines with a logical or and /* with asterisks..
+    $to_replace = array(
+      '/(\r\n?|\n)/', // newlines
+      '/\\\\\*/',     // asterisks
+    );
+    $replacements = array(
+      '|',
+      '.*',
+    );
+    $patterns_quoted = preg_quote($patterns, '/');
+    $regexps[$patterns] = '/^(' . preg_replace($to_replace, $replacements, $patterns_quoted) . ')$/';
+  }
+  return (bool)preg_match($regexps[$patterns], $type);
 }
