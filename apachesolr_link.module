@@ -140,9 +140,13 @@ function apachesolr_link_fetch_url_contents($url) {
       $text = apachesolr_clean_text($response->data);
     }
     elseif (module_exists('apachesolr_attachments') && variable_get('apachesolr_link_extract_files', FALSE) && apachesolr_link_match_mime($response->headers['content-type'], variable_get('apachesolr_link_attachment_types', "application/*\r\n"))) {
+      module_load_include('inc', 'apachesolr_attachments', 'apachesolr_attachments.index');
+
+      // Save the data to a file so that tika can read it.
       $file = file_save_data($response->data, 'temporary://' . drupal_basename($abs_url), FILE_EXISTS_RENAME);
 
       // We have to set the status and save again since we can't specifyu with file_save_data().
+      // This ensures that the files will be deleted upon running cron.
       $file->status = 0;
       $file = file_save($file);
       $filepath = drupal_realpath($file->uri);
@@ -168,6 +172,8 @@ function apachesolr_link_fetch_url_contents($url) {
       $text = trim(apachesolr_clean_text($text));
 
     }
+    // end section copied from apachesolr_attachments.index.inc
+
     else {
       $text = '';
     }
@@ -181,6 +187,7 @@ function apachesolr_link_fetch_url_contents($url) {
 function apachesolr_link_apachesolr_index_document_build_node(ApacheSolrDocument $document, $entity, $env_id) {
   $settings = variable_get('apachesolr_link_indexed_fields', array());
 
+  // Get our list of enabled fields.
   $enabled_fields = array();
   foreach ($settings as $enabled_field_name) {
     // Check to see if this field is enabled.
@@ -189,6 +196,7 @@ function apachesolr_link_apachesolr_index_document_build_node(ApacheSolrDocument
     }
   }
 
+  // Loop over all entity fields and add field content to solr document if field is enabled.
   foreach (apachesolr_entity_fields() as $field_name => $field) {
     if (in_array($field[0]['name'], $enabled_fields)) {
       $solr_field = $document->getField($field_name);
@@ -203,6 +211,7 @@ function apachesolr_link_apachesolr_index_document_build_node(ApacheSolrDocument
  * Implement hook_apachesolr_query_prepare().
  */
 function apachesolr_link_apachesolr_query_prepare(DrupalSolrQueryInterface $query) {
+  // Ensure that our custom field is added to the query.
   $query->addParam('qf', 'tm_apachesolr_link_content');
   $query->addParam('hl.fl', 'tm_apachesolr_link_content');
 }
